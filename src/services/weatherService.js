@@ -38,11 +38,61 @@ export async function searchCities(query) {
 }
 
 /**
+ * Automatically detects user location using IP geolocation
+ */
+export async function detectUserLocation() {
+  // Method 1: ipwho.is
+  try {
+    const res = await fetch('https://ipwho.is/');
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.success && data.latitude && data.longitude) {
+        return {
+          name: data.city || data.region || 'Current Location',
+          admin1: data.region || '',
+          country: data.country || '',
+          countryCode: data.country_code || '',
+          lat: data.latitude,
+          lon: data.longitude,
+          timezone: data.timezone?.id || 'auto',
+          isCurrentLocation: true,
+        };
+      }
+    }
+  } catch (err) {
+    console.warn('ipwhois location detection fallback:', err);
+  }
+
+  // Method 2: bigdatacloud client ip lookup
+  try {
+    const res = await fetch('https://api.bigdatacloud.net/data/reverse-geocode-client');
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.latitude && data.longitude) {
+        return {
+          name: data.city || data.locality || data.principalSubdivision || 'Current Location',
+          admin1: data.principalSubdivision || '',
+          country: data.countryName || '',
+          countryCode: data.countryCode || '',
+          lat: data.latitude,
+          lon: data.longitude,
+          timezone: 'auto',
+          isCurrentLocation: true,
+        };
+      }
+    }
+  } catch (err) {
+    console.warn('bigdatacloud client lookup fallback:', err);
+  }
+
+  return null;
+}
+
+/**
  * Reverse geocodes coordinates (lat, lon) to get city and country names
  */
 export async function reverseGeocode(lat, lon) {
   try {
-    // Free open reverse geocoding via bigdatacloud open api or nominatim
     const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`;
     const res = await fetch(url);
     if (res.ok) {
@@ -50,7 +100,14 @@ export async function reverseGeocode(lat, lon) {
       const city = data.city || data.locality || data.principalSubdivision || 'Current Location';
       const country = data.countryName || '';
       const admin1 = data.principalSubdivision || '';
-      return { name: city, country, admin1, lat, lon };
+      return {
+        name: city,
+        country,
+        admin1,
+        lat,
+        lon,
+        isCurrentLocation: true,
+      };
     }
   } catch (err) {
     console.warn('Reverse geocoding fallback:', err);
@@ -58,11 +115,12 @@ export async function reverseGeocode(lat, lon) {
 
   // Fallback label
   return {
-    name: 'Your Location',
+    name: 'Current Location',
     country: '',
     admin1: '',
     lat,
     lon,
+    isCurrentLocation: true,
   };
 }
 
@@ -129,7 +187,6 @@ async function fetchFromOpenMeteo(lat, lon, locationInfo = {}) {
   const condition = mapWmoCode(current.weather_code, current.is_day);
 
   // Hourly: find index closest to now, take next 24 hours
-  const nowIso = new Date().toISOString();
   let startIndex = 0;
   if (hourly?.time) {
     const idx = hourly.time.findIndex((t) => new Date(t) >= new Date(Date.now() - 30 * 60 * 1000));
@@ -195,6 +252,7 @@ async function fetchFromOpenMeteo(lat, lon, locationInfo = {}) {
       lon,
       timezone: data.timezone || locationInfo.timezone || 'auto',
       localTime: current.time,
+      isCurrentLocation: locationInfo.isCurrentLocation || false,
     },
     current: {
       temp: current.temperature_2m,
@@ -207,7 +265,7 @@ async function fetchFromOpenMeteo(lat, lon, locationInfo = {}) {
       windDirection: current.wind_direction_10m,
       pressure: current.surface_pressure,
       uvIndex: currentUv,
-      visibility: 10, // Standard baseline km
+      visibility: 10,
       isDay: current.is_day,
       condition,
       sunrise: daily.sunrise?.[0] || '',
@@ -222,7 +280,6 @@ async function fetchFromOpenMeteo(lat, lon, locationInfo = {}) {
  * Fetches weather data using OpenWeatherMap 2.5/3.0 APIs
  */
 async function fetchFromOpenWeatherMap(lat, lon, locationInfo, apiKey) {
-  // Current weather
   const curRes = await fetch(
     `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${apiKey}&units=metric`
   );
@@ -232,7 +289,6 @@ async function fetchFromOpenWeatherMap(lat, lon, locationInfo, apiKey) {
   }
   const curData = await curRes.json();
 
-  // 5 day / 3 hour forecast
   const forecastRes = await fetch(
     `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lon}&appid=${apiKey}&units=metric`
   );
@@ -244,7 +300,6 @@ async function fetchFromOpenWeatherMap(lat, lon, locationInfo, apiKey) {
   const curWeatherObj = curData.weather?.[0] || {};
   const condition = mapOwmCode(curWeatherObj.id, curWeatherObj.icon, curWeatherObj.description);
 
-  // Hourly mapping (taking 8 3-hour periods = 24h)
   const hourly = (forecastData.list || []).slice(0, 8).map((item) => {
     const itemWeather = item.weather?.[0] || {};
     return {
@@ -252,12 +307,11 @@ async function fetchFromOpenWeatherMap(lat, lon, locationInfo, apiKey) {
       temp: Math.round(item.main.temp),
       precipitationProb: Math.round((item.pop || 0) * 100),
       condition: mapOwmCode(itemWeather.id, itemWeather.icon, itemWeather.description),
-      windSpeed: Math.round((item.wind?.speed || 0) * 3.6), // m/s to km/h
+      windSpeed: Math.round((item.wind?.speed || 0) * 3.6),
       humidity: item.main.humidity,
     };
   });
 
-  // Group forecast by date for 5-7 days
   const dailyGroups = {};
   (forecastData.list || []).forEach((item) => {
     const date = item.dt_txt ? item.dt_txt.split(' ')[0] : new Date(item.dt * 1000).toISOString().split('T')[0];
@@ -285,7 +339,6 @@ async function fetchFromOpenWeatherMap(lat, lon, locationInfo, apiKey) {
       const maxPop = Math.round(Math.max(...d.pops) * 100);
       const maxWind = Math.round(Math.max(...d.winds) * 3.6);
 
-      // Sunrise & sunset approximation from current
       const sunrise = index === 0 ? new Date(curData.sys?.sunrise * 1000).toISOString() : '';
       const sunset = index === 0 ? new Date(curData.sys?.sunset * 1000).toISOString() : '';
 
@@ -297,7 +350,7 @@ async function fetchFromOpenWeatherMap(lat, lon, locationInfo, apiKey) {
         apparentMax: Math.round(max - 1),
         precipitationProb: maxPop,
         precipitationSum: 0,
-        uvMax: 5, // fallback
+        uvMax: 5,
         sunrise,
         sunset,
         windSpeedMax: maxWind,
@@ -318,6 +371,7 @@ async function fetchFromOpenWeatherMap(lat, lon, locationInfo, apiKey) {
       lon,
       timezone: 'auto',
       localTime: new Date().toISOString(),
+      isCurrentLocation: locationInfo.isCurrentLocation || false,
     },
     current: {
       temp: Math.round(curData.main.temp),
@@ -326,7 +380,7 @@ async function fetchFromOpenWeatherMap(lat, lon, locationInfo, apiKey) {
       tempMax: Math.round(curData.main.temp_max),
       humidity: curData.main.humidity,
       dewPoint: Math.round(curData.main.temp - (100 - curData.main.humidity) / 5),
-      windSpeed: Math.round((curData.wind?.speed || 0) * 3.6), // km/h
+      windSpeed: Math.round((curData.wind?.speed || 0) * 3.6),
       windDirection: curData.wind?.deg || 0,
       pressure: curData.main.pressure,
       uvIndex: 5,

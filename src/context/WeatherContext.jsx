@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { fetchWeatherData, reverseGeocode } from '../services/weatherService';
+import { fetchWeatherData, reverseGeocode, detectUserLocation } from '../services/weatherService';
 import {
   getRecentSearches,
   saveRecentSearch,
@@ -14,11 +14,11 @@ import { useTheme } from './ThemeContext';
 const WeatherContext = createContext();
 
 const DEFAULT_CITIES = [
-  { name: 'San Francisco', country: 'United States', admin1: 'California', lat: 37.7749, lon: -122.4194, timezone: 'America/Los_Angeles' },
   { name: 'Tokyo', country: 'Japan', admin1: 'Tokyo', lat: 35.6762, lon: 139.6503, timezone: 'Asia/Tokyo' },
   { name: 'London', country: 'United Kingdom', admin1: 'England', lat: 51.5074, lon: -0.1278, timezone: 'Europe/London' },
   { name: 'New York', country: 'United States', admin1: 'New York', lat: 40.7128, lon: -74.006, timezone: 'America/New_York' },
   { name: 'Paris', country: 'France', admin1: 'Île-de-France', lat: 48.8566, lon: 2.3522, timezone: 'Europe/Paris' },
+  { name: 'San Francisco', country: 'United States', admin1: 'California', lat: 37.7749, lon: -122.4194, timezone: 'America/Los_Angeles' },
 ];
 
 export function WeatherProvider({ children }) {
@@ -75,64 +75,120 @@ export function WeatherProvider({ children }) {
     setSearchHistory([]);
   };
 
-  const useCurrentLocation = useCallback(() => {
-    if (!navigator.geolocation) {
-      setError('Geolocation is not supported by your browser.');
-      return;
-    }
-
+  /**
+   * Robust Geolocation trigger:
+   * 1. Attempts HTML5 navigator.geolocation (GPS / WiFi)
+   * 2. Automatically falls back to IP Geolocation if permission is denied, timed out, or unavailable.
+   */
+  const useCurrentLocation = useCallback(async () => {
     setIsLocating(true);
     setError(null);
+
+    // Fallback helper using IP geolocation
+    const fallbackToIp = async () => {
+      try {
+        const detected = await detectUserLocation();
+        if (detected && detected.lat && detected.lon) {
+          selectCity(detected);
+          return true;
+        }
+      } catch (e) {
+        console.warn('IP fallback failed:', e);
+      }
+      return false;
+    };
+
+    if (!navigator.geolocation) {
+      const ok = await fallbackToIp();
+      setIsLocating(false);
+      if (!ok) setError('Geolocation is not supported. Please search for your city above.');
+      return;
+    }
 
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         const { latitude, longitude } = pos.coords;
         try {
           const locInfo = await reverseGeocode(latitude, longitude);
-          selectCity(locInfo);
+          selectCity({ ...locInfo, isCurrentLocation: true });
         } catch (e) {
           selectCity({
-            name: 'Your Location',
+            name: 'Current Location',
             lat: latitude,
             lon: longitude,
+            isCurrentLocation: true,
           });
         } finally {
           setIsLocating(false);
         }
       },
-      (geoError) => {
+      async (geoError) => {
+        console.warn('Browser geolocation denied or timed out, trying IP detection:', geoError);
+        const ok = await fallbackToIp();
         setIsLocating(false);
-        let msg = 'Unable to retrieve your location.';
-        if (geoError.code === 1) {
-          msg = 'Location permission denied. You can search for your city above.';
-        } else if (geoError.code === 2) {
-          msg = 'Location unavailable. Please search manually.';
-        } else if (geoError.code === 3) {
-          msg = 'Location request timed out. Please try again.';
+        if (!ok) {
+          let msg = 'Unable to detect location. Please search manually above.';
+          if (geoError.code === 1) {
+            msg = 'Location access was blocked. Please search for your city above.';
+          }
+          setError(msg);
         }
-        setError(msg);
       },
-      { timeout: 10000, enableHighAccuracy: false }
+      { timeout: 6000, enableHighAccuracy: true, maximumAge: 60000 }
     );
   }, [selectCity]);
 
-  // Initial load: restore last searched city or default
+  // Initial load: restore last saved location or automatically detect current location!
   useEffect(() => {
-    const lastLoc = getLastLocation();
-    if (lastLoc && lastLoc.lat && lastLoc.lon) {
-      loadWeather(lastLoc.lat, lastLoc.lon, lastLoc);
-    } else {
-      const defaultCity = DEFAULT_CITIES[0];
-      loadWeather(defaultCity.lat, defaultCity.lon, defaultCity);
-    }
-  }, [loadWeather]);
+    const initWeather = async () => {
+      const lastLoc = getLastLocation();
+      if (lastLoc && lastLoc.lat && lastLoc.lon) {
+        loadWeather(lastLoc.lat, lastLoc.lon, lastLoc);
+        return;
+      }
+
+      // No previous location stored: attempt automatic location detection
+      setIsLocating(true);
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          async (pos) => {
+            const { latitude, longitude } = pos.coords;
+            try {
+              const loc = await reverseGeocode(latitude, longitude);
+              selectCity({ ...loc, isCurrentLocation: true });
+            } catch {
+              selectCity({ name: 'Current Location', lat: latitude, lon: longitude, isCurrentLocation: true });
+            } finally {
+              setIsLocating(false);
+            }
+          },
+          async () => {
+            // Permission denied or timeout: use IP geolocation seamlessly
+            const detected = await detectUserLocation();
+            if (detected) {
+              selectCity(detected);
+            } else {
+              selectCity(DEFAULT_CITIES[0]);
+            }
+            setIsLocating(false);
+          },
+          { timeout: 4000, enableHighAccuracy: false }
+        );
+      } else {
+        const detected = await detectUserLocation();
+        selectCity(detected || DEFAULT_CITIES[0]);
+        setIsLocating(false);
+      }
+    };
+
+    initWeather();
+  }, [loadWeather, selectCity]);
 
   const retry = () => {
     if (activeLocation && activeLocation.lat && activeLocation.lon) {
       loadWeather(activeLocation.lat, activeLocation.lon, activeLocation);
     } else {
-      const defaultCity = DEFAULT_CITIES[0];
-      loadWeather(defaultCity.lat, defaultCity.lon, defaultCity);
+      useCurrentLocation();
     }
   };
 

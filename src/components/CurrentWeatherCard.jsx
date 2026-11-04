@@ -13,17 +13,19 @@ import {
   Wind,
   Sun,
   Gauge,
-  Sparkles,
+  Navigation,
+  RefreshCw,
 } from 'lucide-react';
 
 export default function CurrentWeatherCard() {
-  const { weatherData, unit } = useWeather();
+  const { weatherData, unit, activeLocation, useCurrentLocation, isLocating } = useWeather();
   const { styles } = useTheme();
 
   if (!weatherData) return null;
 
   const { location, current } = weatherData;
   const uvInfo = getUVInfo(current.uvIndex);
+  const isCurrentLoc = activeLocation?.isCurrentLocation || location.isCurrentLocation;
 
   return (
     <motion.div
@@ -53,6 +55,24 @@ export default function CurrentWeatherCard() {
                 </span>
               )}
             </div>
+
+            {/* Current Location Badge */}
+            {isCurrentLoc && (
+              <span className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_12px_rgba(16,185,129,0.3)]">
+                <Navigation className="w-3 h-3 text-emerald-400" />
+                <span>Your Location</span>
+              </span>
+            )}
+
+            {/* Quick sync location button */}
+            <button
+              onClick={useCurrentLocation}
+              disabled={isLocating}
+              title="Update current location weather"
+              className="p-1 rounded-lg border border-white/10 hover:bg-white/10 text-slate-400 hover:text-cyan-300 transition-all"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isLocating ? 'animate-spin text-cyan-400' : ''}`} />
+            </button>
 
             <span className="hidden sm:inline text-slate-500">•</span>
 
